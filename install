@@ -1,0 +1,274 @@
+#!/bin/bash
+# Exit immediately if a command exits with a non-zero status.
+set -e
+
+# --- Initial Setup ---
+echo "Updating package lists and installing dependencies..."
+apt update
+apt install qrencode curl jq -y
+
+# --- Enable BBR ---
+echo "Enabling TCP BBR..."
+if ! sysctl -a | grep -q "net.ipv4.tcp_congestion_control = bbr"; then
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+    echo "✅ BBR has been enabled."
+else
+    echo "✅ BBR is already enabled."
+fi
+
+# --- Install Xray Core ---
+echo "Installing the latest version of Xray-core..."
+bash -c "$(curl -4 -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# --- Generate Keys and IDs ---
+echo "Generating UUID, REALITY keys, and Short ID..."
+# Define the full path to the xray executable to avoid PATH issues
+XRAY_BIN="/usr/local/bin/xray"
+KEYS_FILE="/usr/local/etc/xray/.keys"
+
+# Ensure the keys file exists and is empty
+rm -f "$KEYS_FILE"
+touch "$KEYS_FILE"
+
+# Generate and store keys using the full path to the xray binary
+echo "uuid: $($XRAY_BIN uuid)" >> "$KEYS_FILE"
+$XRAY_BIN x25519 >> "$KEYS_FILE"
+echo "shortsid: $(openssl rand -hex 8)" >> "$KEYS_FILE"
+
+# Read values into variables
+uuid=$(awk -F': ' '/uuid/ {print $2}' "$KEYS_FILE")
+privateKey=$(awk -F': ' '/Private key/ {print $2}' "$KEYS_FILE")
+shortsid=$(awk -F': ' '/shortsid/ {print $2}' "$KEYS_FILE")
+
+# --- Verification Step ---
+if [[ -z "$uuid" || -z "$privateKey" || -z "$shortsid" ]]; then
+    echo "❌ Error: Failed to generate required keys or IDs. Exiting."
+    exit 1
+fi
+echo "✅ Keys and IDs generated successfully."
+
+# --- Create Xray Configuration ---
+echo "Creating Xray config.json..."
+CONFIG_FILE="/usr/local/etc/xray/config.json"
+cat << EOF > "$CONFIG_FILE"
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {
+                "type": "field",
+                "domain": ["geosite:category-ads-all"],
+                "outboundTag": "block"
+            },
+            {
+                "type": "field",
+                "ip": ["geoip:cn"],
+                "outboundTag": "block"
+            }
+        ]
+    },
+    "inbounds": [
+        {
+            "listen": "0.0.0.0",
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "email": "main",
+                        "id": "$uuid",
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "github.com:443",
+                    "xver": 0,
+                    "serverNames": ["github.com", "www.github.com"],
+                    "privateKey": "$privateKey",
+                    "maxTimeDiff": 0,
+                    "shortIds": ["$shortsid"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls"]
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
+        }
+    ]
+}
+EOF
+
+# --- Create Helper Scripts ---
+echo "Creating user management scripts..."
+
+# Script to list users
+cat << 'EOF' > /usr/local/bin/userlist
+#!/bin/bash
+emails=($(jq -r '.inbounds[0].settings.clients[].email' "/usr/local/etc/xray/config.json"))
+if [[ ${#emails[@]} -eq 0 ]]; then
+    echo "Client list is empty."
+    exit 1
+fi
+echo "Client list:"
+for i in "${!emails[@]}"; do
+    echo "$((i+1)). ${emails[$i]}"
+done
+EOF
+
+# Script to get main user link
+cat << 'EOF' > /usr/local/bin/mainuser
+#!/bin/bash
+set -e
+KEYS_FILE="/usr/local/etc/xray/.keys"
+CONFIG_FILE="/usr/local/etc/xray/config.json"
+protocol=$(jq -r '.inbounds[0].protocol' "$CONFIG_FILE")
+port=$(jq -r '.inbounds[0].port' "$CONFIG_FILE")
+uuid=$(awk -F': ' '/uuid/ {print $2}' "$KEYS_FILE")
+pbk=$(awk -F': ' '/Public key/ {print $2}' "$KEYS_FILE")
+sid=$(awk -F': ' '/shortsid/ {print $2}' "$KEYS_FILE")
+sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$CONFIG_FILE")
+ip=$(timeout 3 curl -4 -s icanhazip.com || echo "YOUR_SERVER_IP")
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=chrome&pbk=$pbk&sid=$sid&type=tcp&flow=xtls-rprx-vision&encryption=none#main-$(hostname)"
+echo ""
+echo "Connection Link:"
+echo "$link"
+echo ""
+echo "QR Code:"
+qrencode -t ansiutf8 <<< "$link"
+EOF
+
+# Script to add a new user
+cat << 'EOF' > /usr/local/bin/newuser
+#!/bin/bash
+set -e
+CONFIG_FILE="/usr/local/etc/xray/config.json"
+read -p "Enter username (email): " email
+if [[ -z "$email" || "$email" == *" "* ]]; then
+    echo "Username cannot be empty or contain spaces. Try again."
+    exit 1
+fi
+if jq -e --arg email "$email" '.inbounds[0].settings.clients[] | select(.email == $email)' "$CONFIG_FILE" > /dev/null; then
+    echo "User with this name already exists. Try again."
+    exit 1
+fi
+uuid=$("/usr/local/bin/xray" uuid)
+jq --arg email "$email" --arg uuid "$uuid" '.inbounds[0].settings.clients += [{"email": $email, "id": $uuid, "flow": "xtls-rprx-vision"}]' "$CONFIG_FILE" > tmp.json && mv tmp.json "$CONFIG_FILE"
+systemctl restart xray
+echo "User '$email' created successfully."
+/usr/local/bin/sharelink "$email"
+EOF
+
+# Script to remove a user
+cat << 'EOF' > /usr/local/bin/rmuser
+#!/bin/bash
+set -e
+CONFIG_FILE="/usr/local/etc/xray/config.json"
+emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE"))
+if [[ ${#emails[@]} -eq 0 ]]; then
+    echo "No clients to remove."
+    exit 1
+fi
+echo "Client list:"
+for i in "${!emails[@]}"; do
+    echo "$((i+1)). ${emails[$i]}"
+done
+read -p "Enter the number of the client to remove: " choice
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#emails[@]} )); then
+    echo "Error: number must be between 1 and ${#emails[@]}"
+    exit 1
+fi
+selected_email="${emails[$((choice - 1))]}"
+if [[ "$selected_email" == "main" ]]; then
+    echo "Error: The 'main' user cannot be removed with this script."
+    exit 1
+fi
+jq --arg email "$selected_email" '(.inbounds[0].settings.clients) |= map(select(.email != $email))' "$CONFIG_FILE" > tmp.json && mv tmp.json "$CONFIG_FILE"
+systemctl restart xray
+echo "Client '$selected_email' removed."
+EOF
+
+# Script to share a user's link
+cat << 'EOF' > /usr/local/bin/sharelink
+#!/bin/bash
+set -e
+KEYS_FILE="/usr/local/etc/xray/.keys"
+CONFIG_FILE="/usr/local/etc/xray/config.json"
+emails=($(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE"))
+if [[ -n "$1" ]]; then
+    selected_email="$1"
+else
+    for i in "${!emails[@]}"; do
+       echo "$((i + 1)). ${emails[$i]}"
+    done
+    read -p "Select a client: " client_num
+    if ! [[ "$client_num" =~ ^[0-9]+$ ]] || (( client_num < 1 || client_num > ${#emails[@]} )); then
+        echo "Error: Invalid selection."
+        exit 1
+    fi
+    selected_email="${emails[$((client_num - 1))]}"
+fi
+client_json=$(jq --arg email "$selected_email" -c '.inbounds[0].settings.clients[] | select(.email == $email)' "$CONFIG_FILE")
+protocol=$(jq -r '.inbounds[0].protocol' "$CONFIG_FILE")
+port=$(jq -r '.inbounds[0].port' "$CONFIG_FILE")
+uuid=$(jq -r '.id' <<< "$client_json")
+pbk=$(awk -F': ' '/Public key/ {print $2}' "$KEYS_FILE")
+sid=$(awk -F': ' '/shortsid/ {print $2}' "$KEYS_FILE")
+username=$(jq -r '.email' <<< "$client_json")
+sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$CONFIG_FILE")
+ip=$(timeout 3 curl -4 -s icanhazip.com || echo "YOUR_SERVER_IP")
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=chrome&pbk=$pbk&sid=$sid&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+echo ""
+echo "Connection Link for $username:"
+echo "$link"
+echo ""
+echo "QR Code:"
+qrencode -t ansiutf8 <<< "$link"
+EOF
+
+# --- Final Steps ---
+echo "Setting executable permissions for helper scripts..."
+chmod +x /usr/local/bin/userlist /usr/local/bin/mainuser /usr/local/bin/newuser /usr/local/bin/rmuser /usr/local/bin/sharelink
+
+echo "Restarting Xray service..."
+systemctl restart xray
+
+# Create help file
+cat << EOF > "$HOME/xray_help.txt"
+Xray User Management Commands:
+
+  mainuser      - Show the connection link for the main user
+  newuser       - Create a new user
+  rmuser        - Remove a user
+  sharelink     - Share a connection link for any user
+  userlist      - List all current users
+
+Config file: /usr/local/etc/xray/config.json
+Restart Xray: sudo systemctl restart xray
+EOF
+
+echo "---"
+echo "✅ Xray-core installation complete!"
+echo "A help file has been created at ~/xray_help.txt"
+echo "Displaying the main user's connection info:"
+mainuser
