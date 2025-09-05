@@ -13,15 +13,15 @@ sysctl -p
 echo "bbr has been enabled"
 fi
 
-# Installing Xray-Core
-bash -c "$(curl -4 -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+# Installing Xray-Core, deleted -4 before -L to allow the use of any IP network protocol (IPv4 and IPv6). -4 means only use IPv4
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 [ -f /usr/local/etc/xray/.keys ] && rm /usr/local/etc/xray/.keys
 touch /usr/local/etc/xray/.keys
 chmod 777 /usr/local/etc/xray/.keys
 echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/.keys
 echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
 xray x25519 >> /usr/local/etc/xray/.keys
-echo "" >> /usr/local/etc/xray/.keys  # Adding return carriage after x25519
+echo "" >> /usr/local/etc/xray/.keys  # Adding carriage return after x25519
 
 export uuid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/uuid/ {print $2}')
 export privatekey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PrivateKey/ {print $2}')
@@ -129,7 +129,7 @@ if [[ ${#emails[@]} -eq 0 ]]; then
     exit 1
 fi
 
-echo "Userlist: "
+echo "Userlist:"
 for i in "${!emails[@]}"; do
     echo "$((i+1)). ${emails[$i]}"
 done
@@ -147,14 +147,13 @@ pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Password/ {print $2}')
 sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(timeout 3 curl -4 -s icanhazip.com)
-# link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#vless-$ip"
-link="$protocol://$uuid@humansecured.ddns.net:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#vless-humansecured.ddns.net"
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#main"
+# link="$protocol://$uuid@$hostname.ddns.net:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#main"
 echo ""
 echo "Connection link":
 echo "$link"
 echo ""
-echo "QR-code
-:"
+echo "QR-code:"
 echo ${link} | qrencode -t ansiutf8
 EOF
 chmod +x /usr/local/bin/mainuser
@@ -184,13 +183,13 @@ sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 username=$(jq --argjson index "$index" -r '.inbounds[0].settings.clients[$index].email' /usr/local/etc/xray/config.json)
 sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(curl -4 -s icanhazip.com)
-# link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
-link="$protocol://$uuid@humansecured.ddns.net:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+# link="$protocol://$uuid@humansecured.ddns.net:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
 echo ""
 echo "Access link":
 echo "$link"
 echo ""
-echo "QR-code:"
+echo "QR-код:"
 echo ${link} | qrencode -t ansiutf8
 else
 echo "User with this username already exists. Please try again." 
@@ -268,7 +267,7 @@ echo ""
 echo "Access link":
 echo "$link"
 echo ""
-echo "QR-code:"
+echo "QR-код:"
 echo ${link} | qrencode -t ansiutf8
 EOF
 chmod +x /usr/local/bin/sharelink
